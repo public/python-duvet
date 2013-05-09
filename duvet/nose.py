@@ -7,6 +7,7 @@ import re
 import sys
 import shelve
 
+
 from nose.plugins.base import Plugin
 from nose.util import src, tolist
 
@@ -20,10 +21,13 @@ except ImportError:
     coverage = None
     log.error("Coverage not available: unable to import coverage module")
 
+try:
+    import git
+except ImportError:
+    git = None
+    log.error("Git not available: unable to import module")
 
 class DuvetCover(Plugin):
-    coverMinPercentage = None
-
     score = 200
     status = {}
 
@@ -33,43 +37,26 @@ class DuvetCover(Plugin):
         """
         super(DuvetCover, self).options(parser, env)
         parser.add_option("--duvet-package", action="append",
-                          default=env.get('NOSE_COVER_PACKAGE'),
+                          default=env.get('NOSE_DUVET_PACKAGE'),
                           metavar="PACKAGE",
                           dest="cover_packages",
                           help="Restrict coverage output to selected packages "
-                          "[NOSE_COVER_PACKAGE]")
+                          "[NOSE_DUVET_PACKAGE]")
         parser.add_option("--duvet-erase", action="store_true",
-                          default=env.get('NOSE_COVER_ERASE'),
-                          dest="cover_erase",
+                          default=env.get('NOSE_DUVET_ERASE', False),
+                          dest="duvet_erase",
                           help="Erase previously collected coverage "
                           "statistics before run")
         parser.add_option("--duvet-tests", action="store_true",
                           dest="cover_tests",
-                          default=env.get('NOSE_COVER_TESTS'),
+                          default=env.get('NOSE_DUVET_TESTS', False),
                           help="Include test modules in coverage report "
-                          "[NOSE_COVER_TESTS]")
-        parser.add_option("--duvet-inclusive", action="store_true",
-                          dest="cover_inclusive",
-                          default=env.get('NOSE_COVER_INCLUSIVE'),
-                          help="Include all python files under working "
-                          "directory in coverage report.  Useful for "
-                          "discovering holes in test coverage if not all "
-                          "files are imported by the test suite. "
-                          "[NOSE_COVER_INCLUSIVE]")
-        parser.add_option("--duvet-html", action="store_true",
-                          default=env.get('NOSE_COVER_HTML'),
-                          dest='cover_html',
-                          help="Produce HTML coverage information")
-        parser.add_option('--duvet-html-dir', action='store',
-                          default=env.get('NOSE_COVER_HTML_DIR', 'cover'),
-                          dest='cover_html_dir',
-                          metavar='DIR',
-                          help='Produce HTML coverage information in dir')
+                          "[NOSE_DUVET_TESTS]")
         parser.add_option("--duvet-branches", action="store_true",
-                          default=env.get('NOSE_COVER_BRANCHES'),
+                          default=env.get('NOSE_DUVET_BRANCHES', True),
                           dest="cover_branches",
                           help="Include branch coverage in coverage report "
-                          "[NOSE_COVER_BRANCHES]")
+                          "[NOSE_DUVET_BRANCHES]")
 
     def configure(self, options, conf):
         """
@@ -85,7 +72,7 @@ class DuvetCover(Plugin):
         if conf.worker:
             return
 
-        self.enabled = bool(coverage)
+        self.enabled = bool(coverage) and bool(git)
 
         self.conf = conf
         self.options = options
@@ -116,22 +103,12 @@ class DuvetCover(Plugin):
         log.debug("Coverage begin")
         self.skipModules = sys.modules.copy()
 
-        # remove the existing coverage shelf
-        try:
-            os.remove('.duvet')
-        except OSError:
-            pass
-
-        # setup the coverage instance for tracking everything else
-        self.globalCoverage = coverage.coverage(
-            auto_data=False,
-            branch=self.options.cover_branches,
-            data_suffix=None
-        )
-        self.globalCoverage.exclude('#pragma[: ]+[nN][oO] [cC][oO][vV][eE][rR]')
-        self.globalCoverage.erase()
-        self.globalCoverage.load()
-        self.globalCoverage.start()
+        if self.options.duvet_erase:
+            # remove the existing coverage shelf
+            try:
+                os.remove('.duvet')
+            except OSError:
+                pass
 
     def beforeTest(self, test):
         """
@@ -145,7 +122,6 @@ class DuvetCover(Plugin):
 
         test.coverage.exclude('#pragma[: ]+[nN][oO] [cC][oO][vV][eE][rR]')
         test.coverage.erase()
-        test.coverage.load()
         test.coverage.start()
 
     def afterTest(self, test):
@@ -155,19 +131,18 @@ class DuvetCover(Plugin):
 
         test.coverage.stop()
 
+        # work out git position
+        test_repo = git.Repo('.')
+        commit = None if test_repo.is_dirty() else test_repo.head.commit.hexsha
+
+        cover_key = json.dumps([commit] + list(test.address()))
         cover_data = self.get_coverage_data(test.coverage)
 
         shelf = shelve.open('.duvet')
-        shelf[json.dumps(test.address())] = cover_data
+        shelf[cover_key] = cover_data
         shelf.close()
 
-
     def report(self, stream):
-        self.globalCoverage.stop()
-        cover_data = self.get_coverage_data(self.globalCoverage)
-
-        print >>stream, cover_data
-
         shelf = shelve.open('.duvet')
         print >>stream, "COVERAGE"
         for k in shelf:
@@ -216,18 +191,5 @@ class DuvetCover(Plugin):
         # module, we would have already returned True
         return not self.coverPackages
 
-    def wantFile(self, file, package=None):
-        """If inclusive coverage enabled, return true for all source files
-        in wanted packages.
-        """
-        if self.options.cover_inclusive:
-            if file.endswith(".py"):
-                if package and self.coverPackages:
-                    for want in self.coverPackages:
-                        if package.startswith(want):
-                            return True
-                else:
-                    return True
-        return None
 
 
