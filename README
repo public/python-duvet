@@ -1,0 +1,4 @@
+Author: Alex Stapleton <alexs@prol.etari.at>
+
+Duvet is going to be a per-test coverage plugin for nose and tools for getting
+useful data out of the reports.
