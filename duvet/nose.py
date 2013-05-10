@@ -94,10 +94,10 @@ class DuvetCover(Plugin):
         self.skipModules = sys.modules.copy()
 
         # work out git position
-        test_repo = git.Repo('.')
+        self.gitRepo = git.Repo('.')
         self.gitCommit = (
-            None if test_repo.is_dirty()
-            else test_repo.head.commit.hexsha
+            None if self.gitRepo.is_dirty()
+            else self.gitRepo.head.commit.hexsha
         )
 
         if self.options.duvet_erase:
@@ -109,15 +109,24 @@ class DuvetCover(Plugin):
 
         self.shelf = shelve.open('.duvet')
         if not self.gitCommit in self.shelf:
-            self.shelf[self.gitCommit] = []
+            self.shelf[self.gitCommit] = set()
 
     def beforeTest(self, test):
         """
         Setup a coverage instance just for this test.
         """
 
+        # find most recent data we can on this test
+        history = self.gitRepo.iter_commits('HEAD')
+        if self.shelf:
+            for commit in history:
+                print >>sys.stderr, "OLD?", commit, self.shelf.get(commit.hexsha)
+                if test.address() in self.shelf.get(commit.hexsha, []):
+                    break
+            old_coverage = self.shelf[self._test_key(test, commit.hexsha)]
+            print >>sys.stderr, commit, old_coverage
+
         self.shelf[self._test_key(test)] = None
-        self.shelf[self.gitCommit].append(test.address())
 
         test.coverage = coverage.coverage(
             auto_data=False,
@@ -143,6 +152,7 @@ class DuvetCover(Plugin):
         cover_key = self._test_key(test)
         cover_data = self.get_coverage_data(test.coverage)
         self.shelf[cover_key] = cover_data
+        self.shelf[self.gitCommit].add(test.address())
 
     def afterTest(self, test):
         self.shelf.sync()
@@ -153,8 +163,8 @@ class DuvetCover(Plugin):
         for k in shelf:
             print >>stream, k
 
-    def _test_key(self, test):
-        return json.dumps([self.gitCommit] + list(test.address()))
+    def _test_key(self, test, commit=None):
+        return json.dumps([commit or self.gitCommit] + list(test.address()))
 
     def get_coverage_data(self, coverage_instance):
         # find modules imported during tests
