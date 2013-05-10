@@ -27,9 +27,12 @@ except ImportError:
     git = None
     log.error("Git not available: unable to import module")
 
+
 class DuvetCover(Plugin):
     score = 200
     status = {}
+    gitCommit = None
+    shelf = None
 
     def options(self, parser, env):
         """
@@ -47,16 +50,6 @@ class DuvetCover(Plugin):
                           dest="duvet_erase",
                           help="Erase previously collected coverage "
                           "statistics before run")
-        parser.add_option("--duvet-tests", action="store_true",
-                          dest="cover_tests",
-                          default=env.get('NOSE_DUVET_TESTS', False),
-                          help="Include test modules in coverage report "
-                          "[NOSE_DUVET_TESTS]")
-        parser.add_option("--duvet-branches", action="store_true",
-                          default=env.get('NOSE_DUVET_BRANCHES', True),
-                          dest="cover_branches",
-                          help="Include branch coverage in coverage report "
-                          "[NOSE_DUVET_BRANCHES]")
 
     def configure(self, options, conf):
         """
@@ -90,9 +83,6 @@ class DuvetCover(Plugin):
             log.info("Coverage report will include only packages: %s",
                      self.coverPackages)
 
-        if options.cover_html:
-            log.debug('Will put HTML coverage report in %s', options.cover_html_dir)
-
         if self.enabled:
             self.status['active'] = True
 
@@ -103,6 +93,13 @@ class DuvetCover(Plugin):
         log.debug("Coverage begin")
         self.skipModules = sys.modules.copy()
 
+        # work out git position
+        test_repo = git.Repo('.')
+        self.gitCommit = (
+            None if test_repo.is_dirty()
+            else test_repo.head.commit.hexsha
+        )
+
         if self.options.duvet_erase:
             # remove the existing coverage shelf
             try:
@@ -110,43 +107,54 @@ class DuvetCover(Plugin):
             except OSError:
                 pass
 
+        self.shelf = shelve.open('.duvet')
+        if not self.gitCommit in self.shelf:
+            self.shelf[self.gitCommit] = []
+
     def beforeTest(self, test):
         """
         Setup a coverage instance just for this test.
         """
+
+        self.shelf[self._test_key(test)] = None
+        self.shelf[self.gitCommit].append(test.address())
+
         test.coverage = coverage.coverage(
             auto_data=False,
-            branch=self.options.cover_branches,
             data_suffix=None
         )
 
-        test.coverage.exclude('#pragma[: ]+[nN][oO] [cC][oO][vV][eE][rR]')
         test.coverage.erase()
         test.coverage.start()
 
-    def afterTest(self, test):
+    def stopTest(self, test):
         """
-        Collect the coverage data from this test and shelve them.
+        Stop the coverage collection before recording it
         """
-
         test.coverage.stop()
 
-        # work out git position
-        test_repo = git.Repo('.')
-        commit = None if test_repo.is_dirty() else test_repo.head.commit.hexsha
+    def addFailure(self, test, exc):
+        self.shelf[self._test_key(test)] = False
 
-        cover_key = json.dumps([commit] + list(test.address()))
+    def addError(self, test, exc):
+        self.shelf[self._test_key(test)] = False
+
+    def addSuccess(self, test):
+        cover_key = self._test_key(test)
         cover_data = self.get_coverage_data(test.coverage)
+        self.shelf[cover_key] = cover_data
 
-        shelf = shelve.open('.duvet')
-        shelf[cover_key] = cover_data
-        shelf.close()
+    def afterTest(self, test):
+        self.shelf.sync()
 
     def report(self, stream):
         shelf = shelve.open('.duvet')
         print >>stream, "COVERAGE"
         for k in shelf:
-            print >>stream, k, shelf[k]
+            print >>stream, k
+
+    def _test_key(self, test):
+        return json.dumps([self.gitCommit] + list(test.address()))
 
     def get_coverage_data(self, coverage_instance):
         # find modules imported during tests
@@ -155,7 +163,6 @@ class DuvetCover(Plugin):
         # now extract data from coverage.py and shelve it
         return {mod.__name__: coverage_instance.analysis2(mod)
                 for mod in modules}
-
 
     def wantModuleCoverage(self, name, module):
         if not hasattr(module, '__file__'):
@@ -171,8 +178,6 @@ class DuvetCover(Plugin):
             for package in self.coverPackages:
                 if (
                     re.findall(r'^%s\b' % re.escape(package), name)
-                    and (self.options.cover_tests
-                         or not self.conf.testMatch.search(name))
                 ):
                     log.debug("coverage for %s", name)
                     return True
@@ -180,10 +185,6 @@ class DuvetCover(Plugin):
         if name in self.skipModules:
             log.debug("no coverage for %s: loaded before coverage start",
                       name)
-            return False
-
-        if self.conf.testMatch.search(name) and not self.options.cover_tests:
-            log.debug("no coverage for %s: is a test", name)
             return False
 
         # accept any package that passed the previous tests, unless

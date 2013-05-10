@@ -2,3 +2,16 @@ Author: Alex Stapleton <alexs@prol.etari.at>
 
 Duvet is going to be a per-test coverage plugin for nose and tools for getting
 useful data out of the reports.
+
+
+Currently no Python 3 support because of GitPython.
+
+
+How it works
+============
+
+Duvet records full coverage reports for every test function. Along with this it
+keeps the commit id of the code that was run.
+
+It then uses the diff between the current working copy and the latest known coverage
+report to identify which tests were effected by the changes so it can run those first.
