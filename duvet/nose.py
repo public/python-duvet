@@ -117,7 +117,7 @@ class DuvetCover(Plugin):
         """
 
         # find most recent data we can on this test
-        history = self.gitRepo.iter_commits('HEAD')
+        history = self.gitRepo.iter_commits(self.gitCommit)
         if self.shelf:
             old_coverage = None
             for commit in history:
