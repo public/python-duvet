@@ -12,6 +12,7 @@ import shelve
 from nose.exc import SkipTest
 from nose.plugins.base import Plugin
 from nose.plugins.errorclass import ErrorClass, ErrorClassPlugin
+from nose.suite import ContextSuite
 from nose.util import src, tolist
 
 log = logging.getLogger(__name__)
@@ -31,8 +32,26 @@ def difflines(a, b):
             for i in xrange(group[1], group[2]+1):
                 yield i
 
+
+def iter_suite(suite):
+    """
+    Stolen from django-nose
+    """
+    if (not hasattr(suite, '_tests') or
+        (hasattr(suite, 'hasFixtures') and suite.hasFixtures())):
+        # We hit a Test or something with setup, so do the thing. (Note that
+        # "fixtures" here means setup or teardown routines, not Django
+        # fixtures.)
+        yield suite
+    else:
+        for s in suite._tests:
+            for t in iter_suite(s):
+                yield t
+
+
 class DuvetSkipTest(Exception):
     pass
+
 
 class DuvetCover(ErrorClassPlugin):
     enabled = True
@@ -58,10 +77,23 @@ class DuvetCover(ErrorClassPlugin):
                           help="Restrict coverage output to selected packages "
                           "[NOSE_DUVET_PACKAGE]")
         parser.add_option("--duvet-erase", action="store_true",
-                          default=env.get('NOSE_DUVET_ERASE', False),
+                          default=bool(env.get('NOSE_DUVET_ERASE', False)),
                           dest="duvet_erase",
                           help="Erase previously collected coverage "
                           "statistics before run")
+        parser.add_option("--duvet-skip", action="store_true",
+                          default=bool(env.get('NOSE_DUVET_SKIP', False)),
+                          metavar="PACKAGE",
+                          dest="skip",
+                          help="Skip tests that don't appear to have been effected by changes"
+                          )
+        parser.add_option("--duvet-sort", action="store_true",
+                          default=bool(env.get('NOSE_DUVET_SORT', True)),
+                          metavar="PACKAGE",
+                          dest="sort",
+                          help="Sort the tests so that changed ones are run first"
+                          )
+
 
     def configure(self, options, conf):
         """
@@ -125,15 +157,14 @@ class DuvetCover(ErrorClassPlugin):
         if not self.gitCommit in self.shelf:
             self.shelf[self.gitCommit] = set()
 
-    def beforeTest(self, test):
-        """
-        Setup a coverage instance just for this test.
-        """
 
+    def _modified_test(self, test):
         # find most recent data we can on this test
         history = self.gitRepo.iter_commits(self.gitCommit)
         old_coverage = None
         old_commit = None
+        modified_execs = set()
+
         # dont bother looking if theres no data
         if self.shelf:
             for commit in history:
@@ -149,7 +180,6 @@ class DuvetCover(ErrorClassPlugin):
 
                 # now find the diff between the WC and the last tested commit
                 diffs = old_commit.diff(None)
-                modified_execs = set()
                 for diff in diffs:
                     a_stream = StringIO()
                     diff.a_blob.stream_data(a_stream)
@@ -162,10 +192,25 @@ class DuvetCover(ErrorClassPlugin):
                     executed_lines = set(cover[1]) - set(cover[3])
                     modified_execs = executed_lines & lines
 
-                if not modified_execs:
-                    def skip(*args, **kwargs):
-                        raise DuvetSkipTest(test)
-                    test.test = skip
+        return bool(modified_execs)
+
+    def prepareTest(self, test):
+        if self.options.sort:
+            tests = sorted(
+                iter_suite(test),
+                key=lambda t: (not self._modified_test(t), t.address())
+            )
+            return ContextSuite(tests)
+
+    def beforeTest(self, test):
+        """
+        Setup a coverage instance just for this test.
+        """
+
+        if not self._modified_test(test) and self.options.skip:
+            def skip(*args, **kwargs):
+                raise DuvetSkipTest(test)
+            test.test = skip
 
         test.coverage = coverage.coverage(
             auto_data=False,
