@@ -6,7 +6,7 @@ setup(
 
     entry_points={
         'nose.plugins.0.10': [
-            'duvet = duvet.nose:DuvetCover'
+            'duvet = duvet.nose:DuvetCover',
         ]
     }
 )

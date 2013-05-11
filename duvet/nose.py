@@ -1,38 +1,50 @@
 from __future__ import absolute_import
 
+from cStringIO import StringIO
 import json
 import logging
 import os
+import os.path
 import re
 import sys
 import shelve
 
-
+from nose.exc import SkipTest
 from nose.plugins.base import Plugin
+from nose.plugins.errorclass import ErrorClass, ErrorClassPlugin
 from nose.util import src, tolist
 
 log = logging.getLogger(__name__)
 
-try:
-    import coverage
-    if not hasattr(coverage, 'coverage'):
-        raise ImportError("Unable to import coverage module")
-except ImportError:
-    coverage = None
-    log.error("Coverage not available: unable to import coverage module")
-
-try:
-    import git
-except ImportError:
-    git = None
-    log.error("Git not available: unable to import module")
+from bzrlib import patiencediff
+import coverage
+import git
 
 
-class DuvetCover(Plugin):
+def difflines(a, b):
+    """
+    Generator of the the indexes where changes occured in a
+    """
+    matcher = patiencediff.PatienceSequenceMatcher
+    for groups in matcher(None, a, b).get_grouped_opcodes(0):
+        for group in groups:
+            for i in xrange(group[1], group[2]+1):
+                yield i
+
+class DuvetSkipTest(Exception):
+    pass
+
+class DuvetCover(ErrorClassPlugin):
+    enabled = True
     score = 200
     status = {}
     gitCommit = None
     shelf = None
+    duvet_skipped = ErrorClass(
+        DuvetSkipTest,
+        label="DUVET",
+        isfailure=False
+    )
 
     def options(self, parser, env):
         """
@@ -100,14 +112,16 @@ class DuvetCover(Plugin):
             else self.gitRepo.head.commit.hexsha
         )
 
+        self.duvetPath = os.path.join(self.gitRepo.working_dir, '.duvet')
+
         if self.options.duvet_erase:
             # remove the existing coverage shelf
             try:
-                os.remove('.duvet')
+                os.remove(self.duvetPath)
             except OSError:
                 pass
 
-        self.shelf = shelve.open('.duvet')
+        self.shelf = shelve.open(self.duvetPath)
         if not self.gitCommit in self.shelf:
             self.shelf[self.gitCommit] = set()
 
@@ -118,13 +132,40 @@ class DuvetCover(Plugin):
 
         # find most recent data we can on this test
         history = self.gitRepo.iter_commits(self.gitCommit)
+        old_coverage = None
+        old_commit = None
+        # dont bother looking if theres no data
         if self.shelf:
-            old_coverage = None
             for commit in history:
                 if test.address() in self.shelf.get(commit.hexsha, []):
                     old_coverage = self.shelf[self._test_key(test, commit.hexsha)]
+                    old_commit = commit
                     break
-            print >>sys.stderr, commit, test.address(), len(old_coverage)
+
+            if old_coverage:
+                # map the raw coverage by filename
+                file_covers = {cover[0]: (mod, cover)
+                            for mod, cover in old_coverage.iteritems()}
+
+                # now find the diff between the WC and the last tested commit
+                diffs = old_commit.diff(None)
+                modified_execs = set()
+                for diff in diffs:
+                    a_stream = StringIO()
+                    diff.a_blob.stream_data(a_stream)
+                    a_data = a_stream.getvalue().splitlines()
+                    b_data = open(diff.b_blob.abspath).read().splitlines()
+
+                    lines = set(difflines(a_data, b_data))
+
+                    cover = file_covers[os.path.join(self.gitRepo.working_dir, diff.a_blob.path)][1]
+                    executed_lines = set(cover[1]) - set(cover[3])
+                    modified_execs = executed_lines & lines
+
+                if not modified_execs:
+                    def skip(*args, **kwargs):
+                        raise DuvetSkipTest(test)
+                    test.test = skip
 
         test.coverage = coverage.coverage(
             auto_data=False,
@@ -150,10 +191,16 @@ class DuvetCover(Plugin):
         self.shelf.sync()
 
     def report(self, stream):
-        shelf = shelve.open('.duvet')
+        shelf = self.shelf
         print >>stream, "COVERAGE"
         for k in shelf:
-            print >>stream, k, shelf[k]
+            print >>stream, k, type(shelf[k])
+            try:
+                for m, c in shelf[k].iteritems():
+                    if len(c[1]) != len(c[3]):
+                        print >>stream, "\t", c[0], set(c[1]) - set(c[3])
+            except AttributeError:
+                print >>stream, "\t", shelf[k]
 
     def _test_key(self, test, commit=None):
         return json.dumps([commit or self.gitCommit] + list(test.address()))
