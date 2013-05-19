@@ -4,12 +4,22 @@ import unittest
 
 import duvet.nose
 
-def test_derp():
-    x = duvet.nose.DuvetCover()
-    for i in range(10):
-        y = i * i
+class TestDuvet(unittest.TestCase):
+    def test_mod_inside_test(self):
+        pass
 
-def noexec():
-    x = 1 + 1
-    y = len(sys.modules)
-    return x * y
+    def test_mod_outside_test(self):
+        pass
+
+    def test_add_inside_test(self):
+        pass
+
+    def test_add_outside_test(self):
+        pass
+
+    def test_del_inside_test(self):
+        pass
+
+    def test_del_outisde_test(self):
+        pass
+

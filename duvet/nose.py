@@ -9,8 +9,6 @@ import re
 import sys
 import shelve
 
-from nose.exc import SkipTest
-from nose.plugins.base import Plugin
 from nose.plugins.errorclass import ErrorClass, ErrorClassPlugin
 from nose.suite import ContextSuite
 from nose.util import src, tolist
@@ -24,7 +22,7 @@ import git
 
 def difflines(a, b):
     """
-    Generator of the the indexes where changes occured in a
+    Generator of the the indexes where changes occured in a sequence
     """
     matcher = patiencediff.PatienceSequenceMatcher
     for groups in matcher(None, a, b).get_grouped_opcodes(0):
@@ -35,10 +33,15 @@ def difflines(a, b):
 
 def iter_suite(suite):
     """
-    Stolen from django-nose
+    Stolen from django-nose.
+
+    This triggers on anything that inherits from unittest.TestCase because
+    of NOP setUpClass etc functions.
     """
-    if (not hasattr(suite, '_tests') or
-        (hasattr(suite, 'hasFixtures') and suite.hasFixtures())):
+    if (
+        not hasattr(suite, '_tests') or
+        (hasattr(suite, 'hasFixtures') and suite.hasFixtures())
+    ) and hasattr(suite, 'address'):
         # We hit a Test or something with setup, so do the thing. (Note that
         # "fixtures" here means setup or teardown routines, not Django
         # fixtures.)
@@ -85,15 +88,16 @@ class DuvetCover(ErrorClassPlugin):
                           default=bool(env.get('NOSE_DUVET_SKIP', False)),
                           metavar="PACKAGE",
                           dest="skip",
-                          help="Skip tests that don't appear to have been effected by changes"
+                          help=("Skip tests that don't appear to have been"
+                                "effected by changes")
                           )
         parser.add_option("--duvet-sort", action="store_true",
-                          default=bool(env.get('NOSE_DUVET_SORT', True)),
+                          default=bool(env.get('NOSE_DUVET_SORT', False)),
                           metavar="PACKAGE",
                           dest="sort",
-                          help="Sort the tests so that changed ones are run first"
+                          help=("Sort the tests so that changed ones are run"
+                                "first")
                           )
-
 
     def configure(self, options, conf):
         """
@@ -134,7 +138,6 @@ class DuvetCover(ErrorClassPlugin):
         """
         Begin recording coverage information.
         """
-        log.debug("Coverage begin")
         self.skipModules = sys.modules.copy()
 
         # work out git position
@@ -144,6 +147,7 @@ class DuvetCover(ErrorClassPlugin):
             else self.gitRepo.head.commit.hexsha
         )
 
+        # sort out the shelf to store our data in
         self.duvetPath = os.path.join(self.gitRepo.working_dir, '.duvet')
 
         if self.options.duvet_erase:
@@ -159,24 +163,33 @@ class DuvetCover(ErrorClassPlugin):
 
 
     def _modified_test(self, test):
+        try:
+            return bool(test.duvet_modifications)
+        except AttributeError:
+            pass
+
         # find most recent data we can on this test
         history = self.gitRepo.iter_commits(self.gitCommit)
         old_coverage = None
         old_commit = None
         modified_execs = set()
 
+        print "modified?", test
+
         # dont bother looking if theres no data
         if self.shelf:
             for commit in history:
                 if test.address() in self.shelf.get(commit.hexsha, []):
-                    old_coverage = self.shelf[self._test_key(test, commit.hexsha)]
+                    old_coverage = (
+                        self.shelf[self._test_key(test, commit.hexsha)]
+                    )
                     old_commit = commit
                     break
 
             if old_coverage:
                 # map the raw coverage by filename
                 file_covers = {cover[0]: (mod, cover)
-                            for mod, cover in old_coverage.iteritems()}
+                               for mod, cover in old_coverage.iteritems()}
 
                 # now find the diff between the WC and the last tested commit
                 diffs = old_commit.diff(None)
@@ -188,9 +201,12 @@ class DuvetCover(ErrorClassPlugin):
 
                     lines = set(difflines(a_data, b_data))
 
-                    cover = file_covers[os.path.join(self.gitRepo.working_dir, diff.a_blob.path)][1]
+                    cover = file_covers[os.path.join(self.gitRepo.working_dir,
+                                                     diff.a_blob.path)][1]
                     executed_lines = set(cover[1]) - set(cover[3])
                     modified_execs = executed_lines & lines
+
+        test.duvet_modifications = modified_execs
 
         return bool(modified_execs)
 
@@ -213,8 +229,7 @@ class DuvetCover(ErrorClassPlugin):
             test.test = skip
 
         test.coverage = coverage.coverage(
-            auto_data=False,
-            data_suffix=None
+            data_file=".coverage_%s" % id(test.test),
         )
 
         test.coverage.erase()
@@ -222,21 +237,27 @@ class DuvetCover(ErrorClassPlugin):
 
     def stopTest(self, test):
         """
-        Stop the coverage collection before recording it
+        Stop the test coverage collection before recording it
         """
         test.coverage.stop()
 
     def addSuccess(self, test):
         cover_key = self._test_key(test)
         cover_data = self.get_coverage_data(test.coverage)
+
+        test.coverage.erase()
+
         self.shelf[cover_key] = cover_data
-        self.shelf[self.gitCommit] = self.shelf[self.gitCommit] | set([test.address()])
+        self.shelf[self.gitCommit] = (
+            self.shelf[self.gitCommit] | set([test.address()])
+        )
 
     def afterTest(self, test):
         self.shelf.sync()
 
     def report(self, stream):
         shelf = self.shelf
+
         print >>stream, "COVERAGE"
         for k in shelf:
             print >>stream, k, type(shelf[k])
@@ -285,6 +306,3 @@ class DuvetCover(ErrorClassPlugin):
         # coverPackages is on -- in that case, if we wanted this
         # module, we would have already returned True
         return not self.coverPackages
-
-
-
