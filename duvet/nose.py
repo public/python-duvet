@@ -161,8 +161,20 @@ class DuvetCover(ErrorClassPlugin):
         if not self.gitCommit in self.shelf:
             self.shelf[self.gitCommit] = set()
 
-
     def _modified_test(self, test):
+        """
+        Scans the repo history and stored coverage data to try and work out
+        if the tested code has been modified.
+
+        Module scope changes won't be detected by this because we don't compute
+        a graph of the name resolution within each test. This means code that
+        uses dynamic imports may not get detected properly. It also means if
+        you import the same name from a different module (e.g. simplejson vs json,
+        cStringIO vs StringIO etc) the test will not be detected as changed.
+
+        The current work-around for this is to use --duvet-sort instead of
+        --duvet-skip.
+        """
         try:
             return bool(test.duvet_modifications)
         except AttributeError:
@@ -200,13 +212,18 @@ class DuvetCover(ErrorClassPlugin):
                     b_data = open(diff.b_blob.abspath).read().splitlines()
 
                     lines = set(difflines(a_data, b_data))
-
-                    cover = file_covers[os.path.join(self.gitRepo.working_dir,
-                                                     diff.a_blob.path)][1]
+                    try:
+                        cover = file_covers[os.path.join(self.gitRepo.working_dir,
+                                                        diff.a_blob.path)][1]
+                    except KeyError:
+                        # diff is for a file with no coverage
+                        continue
                     executed_lines = set(cover[1]) - set(cover[3])
                     modified_execs = executed_lines & lines
-
-        test.duvet_modifications = modified_execs
+                    test.duvet_modifications = modified_execs
+            else:
+                # test must be new!
+                return True
 
         return bool(modified_execs)
 
@@ -223,7 +240,10 @@ class DuvetCover(ErrorClassPlugin):
         Setup a coverage instance just for this test.
         """
 
-        if not self._modified_test(test) and self.options.skip:
+        if (
+            self.options.skip and
+            not self._modified_test(test)
+        ):
             def skip(*args, **kwargs):
                 raise DuvetSkipTest(test)
             test.test = skip
