@@ -1,6 +1,7 @@
 from __future__ import absolute_import
 
 from cStringIO import StringIO
+import functools
 import json
 import logging
 import os
@@ -10,6 +11,7 @@ import sys
 import shelve
 
 from nose.plugins.errorclass import ErrorClass, ErrorClassPlugin
+from nose.plugins.skip import SkipTest
 from nose.suite import ContextSuite
 from nose.util import src, tolist
 
@@ -186,44 +188,46 @@ class DuvetCover(ErrorClassPlugin):
         old_commit = None
         modified_execs = set()
 
-        print "modified?", test
-
         # dont bother looking if theres no data
-        if self.shelf:
-            for commit in history:
-                if test.address() in self.shelf.get(commit.hexsha, []):
-                    old_coverage = (
-                        self.shelf[self._test_key(test, commit.hexsha)]
-                    )
-                    old_commit = commit
-                    break
+        if not self.shelf:
+            return True
 
-            if old_coverage:
-                # map the raw coverage by filename
-                file_covers = {cover[0]: (mod, cover)
-                               for mod, cover in old_coverage.iteritems()}
+        for commit in history:
+            if test.address() in self.shelf.get(commit.hexsha, []):
+                old_coverage = (
+                    self.shelf[self._test_key(test, commit.hexsha)]
+                )
+                old_commit = commit
+                break
 
-                # now find the diff between the WC and the last tested commit
-                diffs = old_commit.diff(None)
-                for diff in diffs:
-                    a_stream = StringIO()
-                    diff.a_blob.stream_data(a_stream)
-                    a_data = a_stream.getvalue().splitlines()
-                    b_data = open(diff.b_blob.abspath).read().splitlines()
+        # test must be new!
+        if not old_coverage:
+            return True
 
-                    lines = set(difflines(a_data, b_data))
-                    try:
-                        cover = file_covers[os.path.join(self.gitRepo.working_dir,
-                                                        diff.a_blob.path)][1]
-                    except KeyError:
-                        # diff is for a file with no coverage
-                        continue
-                    executed_lines = set(cover[1]) - set(cover[3])
-                    modified_execs = executed_lines & lines
-                    test.duvet_modifications = modified_execs
-            else:
-                # test must be new!
-                return True
+        # map the raw coverage by filename
+        file_covers = {cover[0]: (mod, cover)
+                       for mod, cover in old_coverage.iteritems()}
+
+        # now find the diff between the WC and the last tested commit
+        diffs = old_commit.diff(None)
+        for diff in diffs:
+            a_stream = StringIO()
+            diff.a_blob.stream_data(a_stream)
+
+            a_data = a_stream.getvalue().splitlines()
+            b_data = open(diff.b_blob.abspath).read().splitlines()
+            diff_lines = set(difflines(a_data, b_data))
+
+            try:
+                cover = file_covers[os.path.join(self.gitRepo.working_dir,
+                                                 diff.a_blob.path)][1]
+            except KeyError:
+                # diff is for a file with no coverage
+                continue
+
+            executed_lines = set(cover[1]) - set(cover[3])
+            modified_execs = executed_lines & diff_lines
+            test.duvet_modifications = modified_execs
 
         return bool(modified_execs)
 
@@ -239,14 +243,14 @@ class DuvetCover(ErrorClassPlugin):
         """
         Setup a coverage instance just for this test.
         """
-
         if (
             self.options.skip and
             not self._modified_test(test)
         ):
+            @functools.wraps(getattr(test.test, test.test._testMethodName))
             def skip(*args, **kwargs):
                 raise DuvetSkipTest(test)
-            test.test = skip
+            setattr(test.test, test.test._testMethodName, skip)
 
         test.coverage = coverage.coverage(
             data_file=".coverage_%s" % id(test.test),
@@ -287,6 +291,10 @@ class DuvetCover(ErrorClassPlugin):
                         print >>stream, "\t", c[0], set(c[1]) - set(c[3])
             except AttributeError:
                 print >>stream, "\t", shelf[k]
+
+
+    def _global_key(self, commit=None):
+        return json.dumps([commit or self.gitCommit, '__coverage__global__'])
 
     def _test_key(self, test, commit=None):
         return json.dumps([commit or self.gitCommit] + list(test.address()))

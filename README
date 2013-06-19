@@ -3,8 +3,8 @@ Author: Alex Stapleton <alexs@prol.etari.at>
 Duvet is going to be a per-test coverage plugin for nose and tools for getting
 useful data out of the reports.
 
-
-Currently no Python 3 support because of GitPython.
+Currently no Python 3 support because of GitPython. Could probably get rid of
+that dependency though since we actually only need very little info from the RCS.
 
 
 How it works
